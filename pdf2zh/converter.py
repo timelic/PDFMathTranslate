@@ -116,11 +116,13 @@ class PDFConverterEx(PDFConverter):
 
 
 class Paragraph:
-    def __init__(self, y, x, x0, x1, size, brk):
+    def __init__(self, y, x, x0, x1, y0, y1, size, brk):
         self.y: float = y  # 初始纵坐标
         self.x: float = x  # 初始横坐标
         self.x0: float = x0  # 左边界
         self.x1: float = x1  # 右边界
+        self.y0: float = y0  # 上边界
+        self.y1: float = y1  # 下边界
         self.size: float = size  # 字体大小
         self.brk: bool = brk  # 换行标记
 
@@ -283,7 +285,7 @@ class TranslateConverter(PDFConverterEx):
                             pstk[-1].brk = True
                     else:                           # 根据当前字符构建一个新的段落
                         sstk.append("")
-                        pstk.append(Paragraph(child.y0, child.x0, child.x0, child.x0, child.size, False))
+                        pstk.append(Paragraph(child.y0, child.x0, child.x0, child.x0, child.y0, child.y1, child.size, False))
                 if not cur_v:                                               # 文字入栈
                     if (                                                    # 根据当前字符修正段落属性
                         child.size > pstk[-1].size                          # 1. 当前字符比段落字体大
@@ -303,6 +305,8 @@ class TranslateConverter(PDFConverterEx):
                 # 更新段落边界，因为段落内换行之后可能是公式开头，所以要在外边处理
                 pstk[-1].x0 = min(pstk[-1].x0, child.x0)
                 pstk[-1].x1 = max(pstk[-1].x1, child.x1)
+                pstk[-1].y0 = min(pstk[-1].y0, child.y0)
+                pstk[-1].y1 = max(pstk[-1].y1, child.y1)
                 # 更新上一个字符
                 xt = child
                 xt_cls = cls
@@ -365,16 +369,67 @@ class TranslateConverter(PDFConverterEx):
             else:
                 return "".join(["%02x" % ord(c) for c in cstk])
 
+        def calculate_text_height(text: str, size: float, x0: float, x1: float, line_spacing: float) -> float:
+            """计算给定文本在指定宽度和行距下的总高度"""
+            total_height = 0
+            current_line_width = 0
+            lines = 1
+
+            for char in text:
+                # 简化的字符宽度计算
+                char_width = size * 0.6  # 假设平均字符宽度
+
+                if current_line_width + char_width > (x1 - x0):
+                    lines += 1
+                    current_line_width = char_width
+                else:
+                    current_line_width += char_width
+
+            total_height = lines * size * line_spacing
+            return total_height
+
+        def find_optimal_line_spacing(text: str, size: float, x0: float, x1: float,
+                                    original_height: float, max_spacing: float,
+                                    min_spacing: float = 1.0) -> float:
+            """找到能适配原始高度的最佳行距"""
+            current_spacing = max_spacing
+
+            while current_spacing > min_spacing:
+                height = calculate_text_height(text, size, x0, x1, current_spacing)
+                print("try height", height)
+                if height <= original_height:
+                    break
+                current_spacing -= 0.1
+
+            return max(current_spacing, min_spacing)
+
+        # 根据目标语言获取默认行距
+        lang_space = {
+            "zh-cn": 1.4, "zh-tw": 1.4, "zh-hans": 1.4, "zh-hant": 1.4, "zh": 1.4,
+            "ja": 1.1, "ko": 1.2, "en": 1.2, "ar": 1.0, "ru": 0.8, "uk": 0.8, "ta": 0.8
+        }
+        default_line_spacing = lang_space.get(self.translator.lang_out.lower(), 1.1)
+
         _x, _y = 0, 0
         for id, new in enumerate(news):
-            x: float = pstk[id].x           # 段落初始横坐标
-            y: float = pstk[id].y           # 段落初始纵坐标
-            x0: float = pstk[id].x0         # 段落左边界
-            x1: float = pstk[id].x1         # 段落右边界
-            size: float = pstk[id].size     # 段落字体大小
-            brk: bool = pstk[id].brk        # 段落换行标记
-            cstk: str = ""                  # 当前文字栈
-            fcur: str = None                # 当前字体 ID
+            x: float = pstk[id].x
+            y: float = pstk[id].y
+            x0: float = pstk[id].x0
+            x1: float = pstk[id].x1
+            size: float = pstk[id].size
+            original_height: float = pstk[id].y1 - pstk[id].y0
+            brk: bool = pstk[id].brk
+
+            print("original_height", original_height)
+
+            # 使用目标语言的默认行距作为最大行距
+            optimal_spacing = find_optimal_line_spacing(
+                new, size, x0, x1, original_height,
+                max_spacing=default_line_spacing
+            )
+
+            cstk: str = ""
+            fcur: str = None
             tx = x
             fcur_ = fcur
             ptr = 0
@@ -418,8 +473,9 @@ class TranslateConverter(PDFConverterEx):
                         cstk = ""
                 if brk and x + adv > x1 + 0.1 * size:  # 到达右边界且原文段落存在换行
                     x = x0
-                    lang_space = {"zh-cn": 1.4, "zh-tw": 1.4, "zh-hans": 1.4, "zh-hant": 1.4, "zh": 1.4, "ja": 1.1, "ko": 1.2, "en": 1.2, "ar": 1.0, "ru": 0.8, "uk": 0.8, "ta": 0.8}
-                    y -= size * lang_space.get(self.translator.lang_out.lower(), 1.1)  # 小语种大多适配 1.1
+                    # lang_space = {"zh-cn": 1.4, "zh-tw": 1.4, "zh-hans": 1.4, "zh-hant": 1.4, "zh": 1.4, "ja": 1.1, "ko": 1.2, "en": 1.2, "ar": 1.0, "ru": 0.8, "uk": 0.8, "ta": 0.8}
+                    # y -= size * lang_space.get(self.translator.lang_out.lower(), 1.1)  # 小语种大多适配 1.1
+                    y -= size * optimal_spacing
                 if vy_regex:  # 插入公式
                     fix = 0
                     if fcur is not None:  # 段落内公式修正纵向偏移
